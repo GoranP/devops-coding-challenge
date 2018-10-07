@@ -2,10 +2,11 @@
 
 # Solution
 Idea for solution is to create infrastructure is base on initial drawing (https://github.com/GoranP/devops-coding-challenge/blob/master/src/scheme.jpg)
-Infrastructure is build with cli tools and wraped up in bash scripts.
-Deployment script is written in bash.
-Simple web service that returns current time is written in golang, and packed in docker.
-Health check script is written in bash.
+
+* Infrastructure is build with cli tools and wraped up in bash scripts.
+* Deployment script is written in bash.
+* Simple web service that returns current time is written in golang, and packed in docker.
+* Health check script is written in bash.
 
 On AWS following will be built:
  * Elastic Container Service (ECS) cluster (FARGATE)
