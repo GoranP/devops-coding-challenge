@@ -59,7 +59,7 @@ Access to AWS web console will also be provided over secure channel.
 # Usage
 Clone this fork
 ```sh
-$ git clone https://
+$ git clone https://github.com/GoranP/devops-coding-challenge.git
 ```
 
 In shell change directory to src:
