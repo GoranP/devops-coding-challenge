@@ -1,7 +1,7 @@
 # Engagetech DevOps Coding Test
 
 # Solution
-Idea for solution is to create infrastructure is base on initial drawing (https://github.com/GoranP/engage/blob/master/src/scheme.jpg)
+Idea for solution is to create infrastructure is base on initial drawing (https://github.com/GoranP/devops-coding-challenge/blob/master/src/scheme.jpg)
 Infrastructure is build with cli tools and wraped up in bash scripts.
 Deployment script is written in bash.
 Simple web service that returns current time is written in golang, and packed in docker.
