@@ -1,0 +1,15 @@
+#!/bin/bash
+
+#access to AWS must be configured previously
+#get repository login access
+$(aws ecr get-login --no-include-email --region eu-west-1) 
+
+#build docker that contins service
+#simple service is written in golang, therefore we use golang docker
+docker build -t gimmetime .
+
+#tag image with correct docker repo path
+docker tag gimmetime:latest 434227579614.dkr.ecr.eu-west-1.amazonaws.com/gimmetime:latest
+
+#push latest image in repo
+docker push 434227579614.dkr.ecr.eu-west-1.amazonaws.com/gimmetime:latest

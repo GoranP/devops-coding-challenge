@@ -1,0 +1,18 @@
+#!/bin/bash
+
+# to deploy we use ECS behavior explained in https://blog.codeship.com/easy-blue-green-deployments-on-amazon-ec2-container-service/
+# 1. update task definition version
+# 2. update service
+# this will trigger roll on deploy that ECS will do automatically
+# 
+# **Remark: it is not full green/blue deploy but it's quite OK in this case
+
+
+#clone task definition - just to increase revision engage-infra:revision++
+aws ecs register-task-definition --family engage-infra --cpu 256 --mem 512 --network-mode awsvpc --execution-role-arn arn:aws:iam::434227579614:role/ecsTaskExecutionRole  --requires-compatibilities FARGATE --cli-input-json file://task-definition.json --query 'taskDefinition.taskDefinitionArn' | tr -d \"
+
+# service update will trigger ECS to deploy new docker with latest revision
+# balancer will drain old ones...
+aws ecs update-service --cluster engage-infra --service engage-infra --task-definition engage-infra
+
+#the end

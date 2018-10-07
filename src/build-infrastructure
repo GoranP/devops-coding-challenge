@@ -1,0 +1,36 @@
+#!/bin/bash
+
+# build-lib defines all functions
+# import all functions in current context
+source build-lib
+
+# configure esc-cli cluster with params eg. eu-west-1
+configure_cluster
+
+# create necessary roles 
+create_prerequisites
+
+echo "Creating ECS cluster..."
+clusterDesc=$(create_fargate_ecs_cluster)
+vpcid=$(get_vpcid $clusterDesc)
+subnet1=$(get_subnet $clusterDesc 1)
+subnet2=$(get_subnet $clusterDesc 2)
+
+
+echo "Creating security groups for ECS and ALB"
+groupid=$(create_alb_security_group $vpcid)
+servicegroupid=$(create_ecs_service_security_group $vpcid $groupid)
+
+echo "Creating Application Load Balancer..."
+#create alb for fargate ECS
+loadBalancerArn=$(create_alb $groupid $subnet1 $subnet2)
+#create target group for alb
+targetGroupArn=$(create_target_group $vpcid)
+
+#create listener for alb
+create_alb_listener $loadBalancerArn $targetGroupArn
+
+echo "Creating and starting ECS service and task with ALB connected"
+compose_ecs_service_with_task $subnet1 $subnet2  $servicegroupid "ecsTaskExecutionRole" $targetGroupArn
+
+print_success_info $loadBalancerArn $targetGroupArn $groupid $servicegroupid 

@@ -1,0 +1,316 @@
+#!/bin/bash
+
+# this is lib bash script - does nothinbg just declares functions
+# here we define all functions for build-infrastrucure
+# and most important hides complexity
+
+function configure_cluster ()
+{
+	#configure ecs-cli tool
+	echo "Configuring ecs-cli cluster file"
+	ecs-cli configure --region eu-west-1 --cluster engage-infra --default-launch-type FARGATE
+}
+
+# prerequisites - creates ECS task and service execution role
+function create_prerequisites () 
+{
+	echo "Creating ecsTaskExecutionRole and ecsServiceExecutionRole roles"
+	aws iam  create-role --role-name ecsTaskExecutionRole --assume-role-policy-document file://task-execution-assume-role.json 2>&1 >/dev/null
+	aws iam  attach-role-policy --role-name ecsTaskExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy 2>&1 >/dev/null
+
+	aws iam  create-role --role-name ecsServiceExecutionRole --assume-role-policy-document file://service-execution-assume-role.json 2>&1 >/dev/null
+	aws iam  attach-role-policy --role-name ecsServiceExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole 2>&1 >/dev/null	
+}
+
+# creates ecs fargate cluster
+# return text result of command for further grep-ing
+function create_fargate_ecs_cluster ()
+{	
+	tmpfile=$(mktemp)
+	ecs-cli up --force --capability-iam --port 80 --azs "eu-west-1a,eu-west-1b" --launch-type FARGATE  > $tmpfile
+	if [ $? -ne 0 ]; then
+		#error occured runnig command
+		echo "Failed to create fargate ECS cluster"
+		exit 1
+	fi
+	echo $tmpfile
+}
+
+# param $1 cluster description text file
+# return vpcid 
+function get_vpcid ()
+{
+	cat $1 | grep "VPC created:" | awk '{split($0,a,"VPC created:"); print a[2]}'
+}
+
+# param $1 cluster description text result (assumtion there is only two subnets)
+# param $2 if integer for subnet 1 or 2
+# return subnet id
+function get_subnet ()
+{
+	if [[ $2 -eq 1 ]]; then
+		cat $1 | grep "Subnet created:" | head -n 1 | awk '{split($0,a,"Subnet created:"); print a[2]}' | tr -d ' '
+	else
+		cat $1 | grep "Subnet created:" | tail -n 1 | awk '{split($0,a,"Subnet created:"); print a[2]}' | tr -d ' '
+	fi
+}
+
+# PARAMS $1 is vpcid
+# return ID of new alb security group
+function create_alb_security_group ()
+{
+	#create group for balancer allowing only http traffic
+	__groupid=$(aws ec2 create-security-group --group-name ecs-alb-group --description "alb-group for ecs" --vpc-id $1 --query 'GroupId' | tr -d \")
+	aws ec2 authorize-security-group-ingress --group-id $__groupid --protocol tcp --port 80 --cidr 0.0.0.0/0 2>&1 >/dev/null
+	if [ $? -ne 0 ]; then
+		#error occured runnig command
+		echo "Failed to create and configure ALB security group"
+		exit 1
+	fi
+	echo $__groupid
+}
+
+# create sec. group for ecs service and allow full rits only to ALB sec. group
+# since must use public IP for task in ECS here we deny any access from outside world
+# param $1 is vpcid
+# param $2 id of alb securioty group 
+# return id of ecs service sec. group
+function create_ecs_service_security_group()
+{
+	__servicegroupid=$(aws ec2 create-security-group --group-name ecs-service-group --description "ecs-service-group" --vpc-id $1 --query 'GroupId' | tr -d \")
+	aws ec2 authorize-security-group-ingress --group-id $__servicegroupid --protocol tcp --port 0-65535 --source-group $2
+	if [ $? -ne 0 ]; then
+		#error occured runnig command
+		echo "Failed to create ecs service security group"
+		exit 1
+	fi
+	echo $__servicegroupid
+}
+
+# params $1 security group ID 
+# params $2 subnet ID
+# params $3 subnet ID
+# return load balancer arn
+function create_alb()
+{
+	__loadBalancerArn=$(aws elbv2 create-load-balancer --name infra-ecs-alb --type application --subnets $2 $3 --security-groups $1 --query 'LoadBalancers[0].LoadBalancerArn' | tr -d \" )
+	if [ $? -ne 0 ]; then
+		#error occured runnig command
+		echo "Failed creating ALB"
+		exit 1
+	fi
+	echo $__loadBalancerArn
+}
+
+# params $1 vpcid
+# return target group arn
+function create_target_group()
+{
+	__targetGroupArn=$(aws elbv2 create-target-group --target-type ip --name infra-gimmetime --protocol HTTP --port 80 --health-check-path "/now" --vpc-id $1 --query 'TargetGroups[0].TargetGroupArn' | tr -d \")
+	if [ $? -ne 0 ]; then
+		#error occured runnig command
+		echo "Faild to create target group"
+		exit 1
+	fi
+	echo $__targetGroupArn
+}
+
+# params $1 load balancer arn
+# params $2 target group arn
+function create_alb_listener ()
+{
+	aws elbv2 create-listener --protocol HTTP --port 80 --load-balancer-arn $1 --default-actions Type=forward,TargetGroupArn=$2  2>&1 >/dev/null
+	if [ $? -ne 0 ]; then
+		#error occured runnig command
+		echo "Failed to create alb listener"
+		exit 1
+	fi	
+}
+
+# params $1 subnet 1
+# params $2 subnet 2
+# params $3 service group id 
+# params $4 taskExecRole
+# params $5 target group arn
+function compose_ecs_service_with_task ()
+{
+	ecsparamfile=$(create_ecs_param_file "$subnet1" "$subnet2" "$servicegroupid" "ecsTaskExecutionRole")
+	#creata service and connect with alb
+	ecs-cli compose --ecs-params $ecsparamfile --file infra-gimme-time.yml --project-name engage-infra service up --launch-type FARGATE --target-group-arn $targetGroupArn --container-name engage-infra-service --container-port 80  --create-log-groups
+	if [ $? -ne 0 ]; then
+		#error occured runnig command
+		echo "Failed to compose ECS service in cluster"
+		exit 1
+	fi
+}
+# create ecs param file for ecs-cli tool
+# params $1 subnet1 
+# params $2 subnet2 
+# params $3 security groups for task derfinition
+# params $4 task execution role
+# returns filename (temporary file)
+function create_ecs_param_file ()
+{
+
+	#set $IFS (Internal Field Separator) to % to preserve whitespaces in strings - easier to parse results and YAML spacing
+	IFS='%'
+
+	ecsparamfile=$(mktemp)
+	yamltemplate="version: 1
+task_definition:
+  task_execution_role: $4
+  ecs_network_mode: awsvpc
+  task_size:
+    mem_limit: 0.5GB
+    cpu_limit: 256
+run_params:
+  network_configuration:
+    awsvpc_configuration:
+      subnets:
+        - $1
+        - $2
+      security_groups:
+        - $3
+      assign_public_ip: ENABLED"
+
+	echo $yamltemplate > $ecsparamfile
+	#return to normal state
+	unset IFS
+	echo $ecsparamfile
+
+}
+# params $1 load balancer arn
+# params $2 target group arn
+# params $3 alb security group id
+# params $4 service security group id
+function print_success_info()
+{
+	lbdns=$(aws elbv2 describe-load-balancers --load-balancer-arn $1 --query 'LoadBalancers[0].DNSName' | tr -d \")
+	echo
+	blueb "ECS cluster with load balancer successfully created!"
+	echo
+	greenb "To verify runnig container run: curl http://$lbdns/now"
+	green  "Service returns UNIX format of time, number of seconds since 1.1.1970"
+	green  "To get meaningful datetime run following:"
+	greenb 'date --date @$(curl --silent '"http://$lbdns/now)"
+	echo
+	blueb  "To scale cluster up and down run following (with desired number of tasks in cluster):"
+	greenb "aws ecs update-service --cluster engage-infra --service engage-infra --desired-count 4"
+	blueb  "Alternativley login to AWS console on web and update cluster service and set desired count"
+	echo
+	echo
+	red    "*** Cleanup helper"
+	red    "To delete all resources ensure that cluster is scaled to 0 (first commmand) and then all other commands:"
+	red    "--------------------------------------------------------------------------------------------------------"
+	echo
+
+	purpleb "  aws ecs update-service --cluster engage-infra --service engage-infra --desired-count 0"
+	echo
+	purpleb "  aws elbv2 delete-load-balancer --load-balancer-arn $1"
+	purpleb "  aws elbv2 delete-target-group --target-group-arn $2"
+	purpleb "  aws ecs delete-service --cluster engage-infra --service engage-infra"
+	echo
+	purpleb "  aws ec2 delete-security-group --group-id $4"
+	purpleb "  aws ec2 delete-security-group --group-id $3"
+	echo
+	purpleb "  ecs-cli down --force --cluster engage-infra	"
+	echo
+	# purpleb "  aws cloudformation delete-stack --stack-name amazon-ecs-cli-setup-engage-infra"
+	# echo
+	purpleb "  aws iam  detach-role-policy --role-name ecsTaskExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+	purpleb "  aws iam  delete-role --role-name ecsTaskExecutionRole"
+	purpleb "  aws iam  detach-role-policy --role-name ecsServiceExecutionRole --policy-arn arn:aws:iam::aws:policy/service-role/AmazonEC2ContainerServiceRole"
+	purpleb "  aws iam  delete-role --role-name ecsServiceExecutionRole"
+	echo
+	purpleb "  aws logs delete-log-group --log-group-name engage-infra-grp"
+
+}
+
+
+
+
+# color helpers - just to beautfy thing in shell
+
+# Colors
+end="\033[0m"
+black="\033[0;30m"
+blackb="\033[1;30m"
+white="\033[0;37m"
+whiteb="\033[1;37m"
+red="\033[0;31m"
+redb="\033[1;31m"
+green="\033[0;32m"
+greenb="\033[1;32m"
+yellow="\033[0;33m"
+yellowb="\033[1;33m"
+blue="\033[0;34m"
+blueb="\033[1;34m"
+purple="\033[0;35m"
+purpleb="\033[1;35m"
+lightblue="\033[0;36m"
+lightblueb="\033[1;36m"
+
+function black {
+  echo -e "${black}${1}${end}"
+}
+
+function blackb {
+  echo -e "${blackb}${1}${end}"
+}
+
+function white {
+  echo -e "${white}${1}${end}"
+}
+
+function whiteb {
+  echo -e "${whiteb}${1}${end}"
+}
+
+function red {
+  echo -e "${red}${1}${end}"
+}
+
+function redb {
+  echo -e "${redb}${1}${end}"
+}
+
+function green {
+  echo -e "${green}${1}${end}"
+}
+
+function greenb {
+  echo -e "${greenb}${1}${end}"
+}
+
+function yellow {
+  echo -e "${yellow}${1}${end}"
+}
+
+function yellowb {
+  echo -e "${yellowb}${1}${end}"
+}
+
+function blue {
+  echo -e "${blue}${1}${end}"
+}
+
+function blueb {
+  echo -e "${blueb}${1}${end}"
+}
+
+function purple {
+  echo -e "${purple}${1}${end}"
+}
+
+function purpleb {
+  echo -e "${purpleb}${1}${end}"
+}
+
+function lightblue {
+  echo -e "${lightblue}${1}${end}"
+}
+
+function lightblueb {
+  echo -e "${lightblueb}${1}${end}"
+}
+
